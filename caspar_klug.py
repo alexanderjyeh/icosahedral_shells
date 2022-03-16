@@ -1,0 +1,269 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+import matplotlib.pyplot as plt
+
+import numpy as np
+from scipy.spatial.distance import pdist
+from scipy.spatial.transform import Rotation as R
+
+from itertools import product
+
+def sector(angle, index):
+    """Returns points in triangle defined by [1, 0, 0] and 
+    [np.cos(rad), np.sin(rad), 0] with index points along each side."""
+    rad = angle * (np.pi/180)
+    a = np.array([1, 0, 0])
+    b = np.array([np.cos(rad), np.sin(rad), 0])
+    pairs = [pair for pair in product(range(index+1), repeat=2) if sum(pair) <= index]
+    sector = []
+    for i, j in pairs:
+        tot = i*a + j*b
+        sector.append(tot)
+    return np.array(sector)
+
+def patch(index):
+    """returns n x 3 array of points composing a 60-120 rhombus in the xy-plane
+    with edge # of points on each side. It is positioned with one corner at the
+    origin and the rhombus in the +x, -y quarter plane."""
+    rad = 60 * (np.pi/180) # 60 deg in radian
+    a = np.array([1, 0, 0])
+    b = np.array([np.cos(rad), np.sin(rad), 0])
+    c = np.array([-np.cos(rad), np.sin(rad), 0])
+    pairs = [p for p in product(range(index+1), repeat=2) if sum(p) <= index]
+    rhomb = []
+    for i, j in pairs:
+        rhomb.append(i*a + j*b)
+        if j > 0: #build lower half of patch
+            rhomb.append(i*b + j*c)
+    return np.array(rhomb)
+
+def hk_face(h, k, e_tol=1e-3):
+    """returns a h, k face within: (-0.5,0,0), (0,sqrt(3)/2,0), (0.5,0,0)
+    This is ready to be ingested by slerp code"""
+
+    if k == 0: # simplest case, default to simplest method
+        return (sector(60, h)/h) - np.array([0.5, 0, 0])
+    
+    rad = 60 * (np.pi/180) # 60 deg in radian
+    a = np.array([           1,           0, 0]) # first cardinal dir in lattice
+    b = np.array([ np.cos(rad), np.sin(rad), 0]) # next cardinal direction
+    c = np.array([-np.cos(rad), np.sin(rad), 0]) # helpful to complete triangles
+    
+    ray, top = h*a+k*b, h*b+k*c  # two rays which define triangle
+    large_patch = rotate(patch(h+k), ray) # patch from which final will be cut
+    
+    # rotate rays to final orientation
+    rot_ray, rot_top = rotate(ray, ray), rotate(top, ray)
+    
+    #define 1/slopes of each side of triangle
+    #helps to cast problem in terms of x intercepts
+    right_run_over_rise = (rot_top[0]-rot_ray[0])/(rot_top[1]-rot_ray[1])
+    left_run_over_rise = rot_top[0]/rot_top[1]
+    
+    # inequalities to cut larger patch down to size
+    right_mask = large_patch[:,0] <= rot_ray[0] + right_run_over_rise*large_patch[:,1] + e_tol
+    left_mask = left_run_over_rise*large_patch[:,1] <= large_patch[:,0] + e_tol 
+    x_axis_mask = large_patch[:,1]>=0
+    
+    # apply inequalities 
+    trim = large_patch[left_mask & x_axis_mask & right_mask]
+    
+    # normalize triangle to edge length of 1 and shift to center on y axis
+    normed_centered = (trim/np.linalg.norm(ray)) - np.array([0.5, 0, 0])
+    return normed_centered
+
+def rotate(points, ray):
+    """Rotates the given array of points (n x 3) such that the projection of 
+    ray (1 x 2 or 3) on the x-y plane would be brought to the x axis"""
+    rad  = np.arctan2(ray[1], ray[0])
+    rot  = np.array([[np.cos(rad), -np.sin(rad), 0],
+                     [np.sin(rad),  np.cos(rad), 0],
+                     [          0,            0, 1]])
+    return points @ rot
+    
+
+def save_xyz(coords, filename, comment=None):
+    """Given a frame or set of frames, saves them to filename as xyz file"""
+    if comment == None:
+        comment = "idx x(um)   y(um)   z(um)   token\n"
+    if len(coords.shape) == 2:
+        coords = coords[np.newaxis,:] #make single frames correct size
+    print(filename)
+    with open(filename, 'w') as output:        
+        for i, frame in enumerate(coords):
+            #print number of particles in frame
+            output.write("    {}\n".format(frame.shape[0]-1))
+            output.write(comment)
+            for j, part in enumerate(frame):
+                output.write("{}\t{:.8f}\t{:.8f}\t{:.8f}\n".format(
+                             j,
+                             *part))
+
+def move_face(points, goal):
+    """rotates collection of points so z-axis at origin is parallel to loc and
+    translates points to loc"""
+    normal = np.array([0, 0, 1])  #assumed original normal
+    goal_norm = goal/np.linalg.norm(goal)
+    axis = np.cross(normal, goal_norm)
+    angle = np.arcsin(np.linalg.norm(axis))
+    rot = R.from_rotvec(angle * axis/np.linalg.norm(axis))
+    return np.array(rot.apply(points))
+
+# code adapted from:
+# https://stackoverflow.com/questions/46777626/mathematically-producing-sphere-shaped-hexagonal-grid
+# barycentric coords for 2D triangle (-0.5,0) (0.5,0) (0,sqrt(3)/2)
+def barycentricCoords(p):
+    """Given 2D coordinate, returns 3D barycentric interpolation"""
+    x,y = p
+    # l3*sqrt(3)/2 = y
+    l3 = y*2./np.sqrt(3.)
+    # l1 + l2 + l3 = 1
+    # 0.5*(l2 - l1) = x
+    l2 = x + 0.5*(1 - l3)
+    l1 = 1 - l2 - l3
+    return np.array([l1,l2,l3])
+
+def slerp(p0,p1,t):
+    """Uniform interpolation of arc defined by p0, p1 (around origin)
+       t=0 -> p0, t=1 -> p1"""
+    assert abs(p0.dot(p0) - p1.dot(p1)) < 1e-7
+    ang0Cos = p0.dot(p1)/p0.dot(p0)
+    ang0Sin = np.sqrt(1 - ang0Cos*ang0Cos)
+    ang0 = np.arctan2(ang0Sin,ang0Cos)
+    l0 = np.sin((1-t)*ang0)
+    l1 = np.sin(t    *ang0)
+    return np.array([(l0*p0[i] + l1*p1[i])/ang0Sin for i in range(len(p0))])
+
+# map 2D point p to spherical triangle s1,s2,s3 (3D vectors of equal length)
+def mapPointToTriangle(p,s1,s2,s3):
+    l1,l2,l3 = barycentricCoords(p)
+    if abs(l3-1) < 1e-10: return s3
+    l2s = l2/(l1+l2)
+    p12 = slerp(s1,s2,l2s)
+    return slerp(p12,s3,l3)
+
+def mapFaceToTriangle(covering, triangle):
+    """takes array of points and returns each point mapped to given triangle"""
+    answer = []
+    for point in covering:
+        answer.append(mapPointToTriangle(point[:2], *triangle))
+    return np.array(answer)
+
+def mapFaceToIco(covering, icoTriangles):
+    """takes in array of points in barycentric coordinates and maps to every
+    face of icosahedron"""
+    answer = []
+    for tri in icoTriangles:
+        answer.append(mapFaceToTriangle(covering, tri))
+    multi_dim = np.reshape(np.array(answer), (-1,3))
+    uniques = np.unique(multi_dim.round(decimals=10), axis=0)
+    return uniques
+
+if __name__=="__main__":
+    #%% troubleshooting h k patches
+   
+    def get_tri_edges(h, k):
+        theta = 60 * (np.pi/180)
+        a = np.array([1, 0, 0])
+        b = np.array([np.cos(theta), np.sin(theta), 0])
+        c = np.array([-np.cos(theta), np.sin(theta), 0])
+        return np.array([0*a, h*a+k*b, h*b+k*c, 0*a])
+    
+    equivalent_shells = [(5,3), (7,0)]
+    large_patch = patch(max([h+k for h,k in equivalent_shells]))
+    
+    fig = plt.figure()
+    ax = fig.add_subplot(111)
+    ax.set_aspect('equal')
+    ax.scatter(large_patch[:,0], large_patch[:,1], alpha=0.25)
+    for h, k in equivalent_shells:
+        curr = get_tri_edges(h, k)
+        ax.plot(curr[:,0], curr[:,1], label=f'({h},{k})')
+    ax.legend()
+    ax.set_title('T=49 faces cut from a triangular lattice')
+    
+    fig = plt.figure()
+    ax = fig.add_subplot(111)
+    ax.set_aspect('equal')
+    for h, k in equivalent_shells:
+        curr = hk_face(h, k)
+        print(f"{h}, {k}: {curr.shape[0]}")
+        ax.scatter(curr[:,0], curr[:,1], 
+                   label=f'({h},{k}) N:{curr.shape[0]}',alpha=0.5)
+    ax.legend()
+    ax.set_title('T=49 faces and the total number of particles in each triangle')
+    ax.set_xlim([-0.6, 0.6])
+    
+    #%% set up code for icosahedron adapted from:
+    # https://stackoverflow.com/questions/46777626/mathematically-producing-sphere-shaped-hexagonal-grid
+    #upper half is z-axis, and 5 points on circle radius s at height h
+    h = 1/np.sqrt(5)
+    s = 2*h
+    topPoints = ([(0,0,1)]
+                 + [(s*np.cos(i*2*np.pi/5.),
+                     s*np.sin(i*2*np.pi/5.),
+                     h) for i in range(5)])
+    
+    # bottom half is reflected across z and alternates with above points
+    bottomPoints = [(-x,y,-z) for (x,y,z) in topPoints]
+    icoPoints = np.array(topPoints + bottomPoints)
+    icoTriPnts = np.array([(0,i+1,(i+1)%5+1) for i in range(5)]
+                          + [(6,i+7,(i+1)%5+7) for i in range(5)] 
+                          + [(i+1,(i+1)%5+1,(7-i)%5+7) for i in range(5)] 
+                          + [(i+1,(7-i)%5+7,(8-i)%5+7) for i in range(5)])
+    icoTri = np.array([[icoPoints[p] for p in icoTriPnts[i]] for i in range(len(icoTriPnts))])
+
+    #%% create an example geodesic polyhedron
+    # create initial tiling for one face
+    first_segment = sector(60, 10)
+    
+    # create hcp tiling on the triangle: (-0.5,0,0), (0,sqrt(3)/2,0), (0.5,0,0)
+    face = first_segment/np.linalg.norm(first_segment[-1]) - np.array([0.5, 0, 0])
+    face = hk_face(10, 0)
+    
+    fig = plt.figure()
+    ax = fig.add_subplot(111)
+    ax.scatter(*np.hsplit(face, 3)[:2])
+    ax.set_aspect('equal')
+    #fig.savefig("one_face.jpg", bbox_inches='tight')
+    
+    # map tiling onto unit sphere at origin
+    full_sphere = mapFaceToIco(face, icoTri)
+    hemi = full_sphere[full_sphere[:,2]>0] #get top half of sphere
+    
+    # find the minimum interparticle spacing
+    spacing = min(pdist(hemi))
+    print("{:.5f} spacing, {:.2f} sphere".format(spacing, 2.015/spacing))
+    expanded = hemi*(2.015/spacing) # make minimum interparticle spacing 2.015a
+    
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')    
+    ax.scatter(*np.hsplit(expanded, 3))
+    #fig.savefig("expanded_shell.jpg", bbox_inches='tight')
+    
+    #%% save configuration
+    
+    # distance from each particle to z axis
+    flat_dist = np.linalg.norm(expanded[:,:2], axis=1)
+    middle_300 = expanded[flat_dist<18.99] # gives ~301 particles
+#    save_xyz(middle_300, "301_h23k0_40um.xyz")
+    #%%
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+    ax.scatter(*np.hsplit(middle_300, 3))
+    #fig.savefig("final_cap.jpg", bbox_inches='tight')
+    
+    #%% h, k and T
+    total = 10
+    
+    t_num = {}
+    for h in range(1, total+1):
+        for k in range(0, h+1):
+            t = h**2 + h*k + k**2
+            if t not in t_num.keys():
+                t_num[t] = [(h, k)]
+            else:
+                t_num[t].append((h,k))
+            print(f"({str(h):3},{str(k):3}): {h**2 + h*k + k**2}")
+    
