@@ -6,6 +6,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy.spatial.distance import pdist
 from scipy.spatial.transform import Rotation as R
+import pandas as pd
+
+from matplotlib import rcParams
+rcParams.update({'figure.autolayout': True})
 
 from itertools import product
 
@@ -100,16 +104,6 @@ def save_xyz(coords, filename, comment=None):
                              j,
                              *part))
 
-def move_face(points, goal):
-    """rotates collection of points so z-axis at origin is parallel to loc and
-    translates points to loc"""
-    normal = np.array([0, 0, 1])  #assumed original normal
-    goal_norm = goal/np.linalg.norm(goal)
-    axis = np.cross(normal, goal_norm)
-    angle = np.arcsin(np.linalg.norm(axis))
-    rot = R.from_rotvec(angle * axis/np.linalg.norm(axis))
-    return np.array(rot.apply(points))
-
 # code adapted from:
 # https://stackoverflow.com/questions/46777626/mathematically-producing-sphere-shaped-hexagonal-grid
 # barycentric coords for 2D triangle (-0.5,0) (0.5,0) (0,sqrt(3)/2)
@@ -160,6 +154,46 @@ def mapFaceToIco(covering, icoTriangles):
     uniques = np.unique(multi_dim.round(decimals=10), axis=0)
     return uniques
 
+#%% set up code for icosahedron adapted from:
+# https://stackoverflow.com/questions/46777626/mathematically-producing-sphere-shaped-hexagonal-grid
+#upper half is z-axis, and 5 points on circle radius s at height h
+h = 1/np.sqrt(5)
+s = 2*h
+topPoints = ([(0,0,1)]
+             + [(s*np.cos(i*2*np.pi/5.),
+                 s*np.sin(i*2*np.pi/5.),
+                 h) for i in range(5)])
+
+# bottom half is reflected across z and alternates with above points
+bottomPoints = [(-x,y,-z) for (x,y,z) in topPoints]
+icoPoints = np.array(topPoints + bottomPoints)
+# reorder triangles to always increase in counter-clockwise direction
+icoTriPoints = np.array([[ 0,  1,  2],
+                         [ 0,  2,  3],
+                         [ 0,  3,  4],
+                         [ 0,  4,  5],
+                         [ 0,  5,  1],
+                         [ 6,  7,  8],
+                         [ 6,  8,  9],
+                         [ 6,  9, 10],
+                         [ 6, 10, 11],
+                         [ 6, 11,  7],
+                         [ 1,  9,  2],
+                         [ 2,  8,  3],
+                         [ 3,  7,  4],
+                         [ 4, 11,  5],
+                         [ 5, 10,  1],
+                         [ 1, 10,  9],
+                         [ 2,  9,  8],
+                         [ 3,  8,  7],
+                         [ 4,  7, 11],
+                         [ 5, 11, 10]])
+icoTri = np.array([[icoPoints[p] for p in icoTriPoints[i]] for i in range(len(icoTriPoints))])
+
+def hk_sphere(h, k, e_tol=1e-3):
+    triangle = hk_face(h, k, e_tol)
+    return mapFaceToIco(triangle, icoTri)
+
 if __name__=="__main__":
     #%% troubleshooting h k patches
    
@@ -182,6 +216,7 @@ if __name__=="__main__":
         ax.plot(curr[:,0], curr[:,1], label=f'({h},{k})')
     ax.legend()
     ax.set_title('T=49 faces cut from a triangular lattice')
+    fig.savefig("cutting_faces.jpg", bbox_inches='tight')
     
     fig = plt.figure()
     ax = fig.add_subplot(111)
@@ -194,76 +229,55 @@ if __name__=="__main__":
     ax.legend()
     ax.set_title('T=49 faces and the total number of particles in each triangle')
     ax.set_xlim([-0.6, 0.6])
+    fig.savefig("T49_overlaid.jpg", bbox_inches='tight')
     
-    #%% set up code for icosahedron adapted from:
-    # https://stackoverflow.com/questions/46777626/mathematically-producing-sphere-shaped-hexagonal-grid
-    #upper half is z-axis, and 5 points on circle radius s at height h
-    h = 1/np.sqrt(5)
-    s = 2*h
-    topPoints = ([(0,0,1)]
-                 + [(s*np.cos(i*2*np.pi/5.),
-                     s*np.sin(i*2*np.pi/5.),
-                     h) for i in range(5)])
-    
-    # bottom half is reflected across z and alternates with above points
-    bottomPoints = [(-x,y,-z) for (x,y,z) in topPoints]
-    icoPoints = np.array(topPoints + bottomPoints)
-    icoTriPnts = np.array([(0,i+1,(i+1)%5+1) for i in range(5)]
-                          + [(6,i+7,(i+1)%5+7) for i in range(5)] 
-                          + [(i+1,(i+1)%5+1,(7-i)%5+7) for i in range(5)] 
-                          + [(i+1,(7-i)%5+7,(8-i)%5+7) for i in range(5)])
-    icoTri = np.array([[icoPoints[p] for p in icoTriPnts[i]] for i in range(len(icoTriPnts))])
-
-    #%% create an example geodesic polyhedron
-    # create initial tiling for one face
-    first_segment = sector(60, 10)
-    
-    # create hcp tiling on the triangle: (-0.5,0,0), (0,sqrt(3)/2,0), (0.5,0,0)
-    face = first_segment/np.linalg.norm(first_segment[-1]) - np.array([0.5, 0, 0])
-    face = hk_face(10, 0)
-    
-    fig = plt.figure()
-    ax = fig.add_subplot(111)
-    ax.scatter(*np.hsplit(face, 3)[:2])
-    ax.set_aspect('equal')
-    #fig.savefig("one_face.jpg", bbox_inches='tight')
-    
-    # map tiling onto unit sphere at origin
-    full_sphere = mapFaceToIco(face, icoTri)
-    hemi = full_sphere[full_sphere[:,2]>0] #get top half of sphere
-    
-    # find the minimum interparticle spacing
-    spacing = min(pdist(hemi))
-    print("{:.5f} spacing, {:.2f} sphere".format(spacing, 2.015/spacing))
-    expanded = hemi*(2.015/spacing) # make minimum interparticle spacing 2.015a
-    
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection='3d')    
-    ax.scatter(*np.hsplit(expanded, 3))
-    #fig.savefig("expanded_shell.jpg", bbox_inches='tight')
-    
-    #%% save configuration
-    
-    # distance from each particle to z axis
-    flat_dist = np.linalg.norm(expanded[:,:2], axis=1)
-    middle_300 = expanded[flat_dist<18.99] # gives ~301 particles
-#    save_xyz(middle_300, "301_h23k0_40um.xyz")
-    #%%
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection='3d')
-    ax.scatter(*np.hsplit(middle_300, 3))
-    #fig.savefig("final_cap.jpg", bbox_inches='tight')
-    
-    #%% h, k and T
-    total = 10
-    
-    t_num = {}
-    for h in range(1, total+1):
+    #%% h, k over initial range, with some important metrics
+    temp_stats = {}
+    for h in range(1, 10):
         for k in range(0, h+1):
             t = h**2 + h*k + k**2
-            if t not in t_num.keys():
-                t_num[t] = [(h, k)]
-            else:
-                t_num[t].append((h,k))
-            print(f"({str(h):3},{str(k):3}): {h**2 + h*k + k**2}")
+            curr_sphere = hk_sphere(h, k)
+            min_spacing = pdist(curr_sphere).min()
+            min_r = 1/min_spacing  #minimum radius so particles are 1 unit apart
+            assert 10*t + 2 == curr_sphere.shape[0], 'hk_sphere does not match analytic expression'
+            pnum = 10*t + 2
+            # below finds eta_eff if R is in units of a_eff
+            eta_eff = (pnum*0.5**2)/(4*min_r**2)
+            temp_stats[(h, k)] = (h, k, t, min_spacing, min_r, pnum, eta_eff)
+            
+    hk_stats = pd.DataFrame.from_dict(temp_stats, orient='index',
+                                      columns=('h', 'k', 'tnum', 'min_spacing', 'min_r', 'pnum', 'eta_eff'))
     
+    #%% plotting clearly
+    fig, ax = plt.subplots()
+    for k in np.unique(hk_stats.k):
+        mask = hk_stats.k == k
+        ax.scatter(hk_stats[mask].pnum, hk_stats[mask].eta_eff,
+                   label=f"(h, {k})")
+    ax.legend()
+    ax.set_xlabel('number of particles')
+    ax.set_ylabel(r'$\eta_{eff}$', size=12)
+    ax.set_title('$\eta_{eff}$ of icosahedral shells with particles at $2a_{eff}$')
+    fig.savefig("eta_eff_over_pnum_k_colored.jpg", bbox_inches='tight')
+
+    fig, ax = plt.subplots()
+    for h in np.unique(hk_stats.h):
+        mask = hk_stats.h == h
+        ax.scatter(hk_stats[mask].pnum, hk_stats[mask].eta_eff,
+                   label=f"({h}, k)")
+    ax.legend()
+    ax.set_xlabel('number of particles')
+    ax.set_ylabel(r'$\eta_{eff}$', size=12)
+    ax.set_title('$\eta_{eff}$ of icosahedral shells with particles at $2a_{eff}$')
+    fig.savefig("eta_eff_over_pnum_h_colored.jpg", bbox_inches='tight')
+    
+    fig, ax = plt.subplots()
+    for k in np.unique(hk_stats.k):
+        mask = hk_stats.k == k
+        ax.scatter(hk_stats[mask].pnum, hk_stats[mask].min_r,
+                   label=f"(h, {k})")
+    ax.legend()
+    ax.set_xlabel('number of particles')
+    ax.set_ylabel(r'minimum radius [$2a_{eff}$]', size=12)
+    ax.set_title(r'Radius of icosahedral shells with particles at $2a_{eff}$')
+    fig.savefig("rmin_over_pnum_k_colored.jpg", bbox_inches='tight')
